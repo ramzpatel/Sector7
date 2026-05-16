@@ -4,8 +4,8 @@
 
 > **The 3D First-Person Shooter crammed entirely into a SINGLE HTML FILE. Yes, you read that right.**
 
-![Insert Epic Screenshot Here](Put_Your_Image_Link_Here.jpg)
-*(Replace `Put_Your_Image_Link_Here.jpg` with a link to your sickest in-game screenshot or drag-and-drop the image right into GitHub to auto-generate the link!)*
+<img width="1432" height="664" alt="image" src="https://github.com/user-attachments/assets/7026e6c1-d363-4288-a764-1dd41339370a" />
+
 
 ---
 
