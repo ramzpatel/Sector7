@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Procedural FPS: Phase 5 (Engine Fix)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; }
+        #hud { position: absolute; bottom: 20px; left: 20px; color: #0f0; font-size: 24px; text-shadow: 0 0 5px #0f0; pointer-events: none; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 24px; height: 24px; border: 2px solid #0f0; transform: translate(-50%, -50%); border-radius: 50%; pointer-events: none; mix-blend-mode: difference; }
+        #instr { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; text-align: center; background: rgba(0,0,0,0.9); padding: 30px; border: 2px solid #0f0; z-index: 10; cursor: pointer; min-width: 300px; }
+        .dot { position: absolute; width: 4px; height: 4px; background: #0f0; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        .hit-marker { position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; border: 2px solid red; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; transition: opacity 0.1s; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="hud">HP: 100 | LVL: 1</div>
+    <div id="crosshair"><div class="dot"></div></div>
+    <div id="hit-feedback" class="hit-marker"></div>
+    <div id="instr">
+        <h2 style="margin:0 0 10px 0; color:#0f0">PHASE 5: ENGINE FIX</h2>
+        1. Controls are now Relative (W always moves Forward).<br>
+        2. Mouse Tilt is fixed.<br>
+        3. Shotgun Hitbox increased.<br><br>
+        <b>CLICK TO START</b>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- CONFIG ---
+        const TILE_SIZE = 8; // Huge rooms
+        const PLAYER_HEIGHT = 2;
+        const PLAYER_SPEED = 15.0;
+        
+        // --- VARIABLES ---
+        let scene, camera, renderer;
+        let playerBody, playerHead; // Separate Head/Body fixes the rotation issues
+        let moveFwd=0, moveBwd=0, moveLeft=0, moveRight=0;
+        let prevTime = performance.now();
+        let velocity = new THREE.Vector3();
+        let isLocked = false;
+        let mapData = [];
+        let enemies = [];
+        let mazeSize = 15;
+        let gameLevel = 1;
+        let playerHP = 100;
+        let portal;
+
+        // --- AUDIO ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playTone(freq, type, dur, vol) {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + dur);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + dur);
+        }
+
+        // --- TEXTURES (Procedural) ---
+        function getTexture(c1, c2) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 128;
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = c1; ctx.fillRect(0,0,128,128);
+            ctx.fillStyle = c2; 
+            for(let i=0; i<400; i++) ctx.fillRect(Math.random()*128, Math.random()*128, 2, 2);
+            ctx.strokeStyle = '#000'; ctx.lineWidth = 4; ctx.strokeRect(0,0,128,128);
+            const t = new THREE.CanvasTexture(c);
+            t.magFilter = THREE.NearestFilter;
+            return t;
+        }
+
+        // --- MAZE ---
+        function createMaze(size) {
+            let m = Array(size).fill().map(()=>Array(size).fill(1));
+            function carve(x, y) {
+                m[y][x] = 0;
+                const dirs = [[0,-2],[0,2],[-2,0],[2,0]].sort(()=>Math.random()-0.5);
+                for(let [dx, dy] of dirs) {
+                    const nx = x+dx, ny = y+dy;
+                    if(nx>0 && nx<size-1 && ny>0 && ny<size-1 && m[ny][nx]===1) {
+                        m[y+dy/2][x+dx/2] = 0;
+                        carve(nx, ny);
+                    }
+                }
+            }
+            carve(1,1);
+            m[1][1] = 0; m[1][2] = 0; // Ensure start is clear
+            return m;
+        }
+
+        // --- SETUP ---
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.08);
+            
+            // CAMERA SETUP (The "Euler" Fix)
+            // 1. The Body handles position and Y-Rotation (Left/Right)
+            playerBody = new THREE.Group();
+            scene.add(playerBody);
+
+            // 2. The Head handles X-Rotation (Up/Down)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            playerHead = new THREE.Group();
+            playerHead.position.y = PLAYER_HEIGHT; 
+            playerHead.add(camera); // Camera is inside the head
+            playerBody.add(playerHead); // Head is on the body
+
+            // RENDERER
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            startLevel();
+
+            // INPUTS
+            document.body.onclick = () => {
+                document.body.requestPointerLock();
+                if(isLocked) shoot();
+            };
+            document.addEventListener('pointerlockchange', () => {
+                isLocked = document.pointerLockElement === document.body;
+                document.getElementById('instr').style.display = isLocked ? 'none' : 'block';
+            });
+            
+            // MOUSE LOOK (Fixed)
+            document.addEventListener('mousemove', (e) => {
+                if(!isLocked) return;
+                // Rotate BODY for Left/Right
+                playerBody.rotation.y -= e.movementX * 0.002;
+                // Rotate HEAD for Up/Down
+                playerHead.rotation.x -= e.movementY * 0.002;
+                // Clamp looking up/down (prevent neck breaking)
+                playerHead.rotation.x = Math.max(-1.5, Math.min(1.5, playerHead.rotation.x));
+            });
+
+            document.addEventListener('keydown', e => onKey(e.code, 1));
+            document.addEventListener('keyup', e => onKey(e.code, 0));
+
+            loop();
+        }
+
+        function onKey(k, v) {
+            if(k=='KeyW') moveFwd=v; if(k=='KeyS') moveBwd=v;
+            if(k=='KeyA') moveLeft=v; if(k=='KeyD') moveRight=v;
+        }
+
+        function startLevel() {
+            // Cleanup
+            enemies.forEach(e => scene.remove(e.mesh));
+            if(portal) scene.remove(portal);
+            if(scene.children.length > 50) { // Safety cleanup
+                while(scene.children.length > 0) scene.remove(scene.children[0]);
+                scene.add(playerBody); 
+            }
+            
+            enemies = [];
+            mazeSize = 12 + (gameLevel * 2);
+            mapData = createMaze(mazeSize);
+
+            // Build Level
+            const geo = new THREE.BoxGeometry(TILE_SIZE, TILE_SIZE * 2, TILE_SIZE);
+            const texW = getTexture('#555', '#777');
+            const texF = getTexture('#222', '#333');
+            const matW = new THREE.MeshStandardMaterial({ map: texW });
+            const matF = new THREE.MeshStandardMaterial({ map: texF });
+
+            for(let y=0; y<mazeSize; y++) {
+                for(let x=0; x<mazeSize; x++) {
+                    if(mapData[y][x] === 1) {
+                        const wall = new THREE.Mesh(geo, matW);
+                        wall.position.set(x*TILE_SIZE, TILE_SIZE, y*TILE_SIZE);
+                        scene.add(wall);
+                    } else {
+                        const floor = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE), matF);
+                        floor.rotation.x = -Math.PI/2;
+                        floor.position.set(x*TILE_SIZE, 0, y*TILE_SIZE);
+                        scene.add(floor);
+                        
+                        // Ceiling
+                        const ceil = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE, TILE_SIZE), matF);
+                        ceil.rotation.x = Math.PI/2;
+                        ceil.position.set(x*TILE_SIZE, TILE_SIZE*2, y*TILE_SIZE);
+                        scene.add(ceil);
+                    }
+                }
+            }
+
+            // Reset Player
+            playerBody.position.set(TILE_SIZE * 1.5, 0, TILE_SIZE * 1.5);
+            playerBody.rotation.y = 0;
+            velocity.set(0,0,0);
+
+            // Lights
+            scene.add(new THREE.AmbientLight(0x404040));
+            const lantern = new THREE.PointLight(0xffaa00, 1.5, 25);
+            lantern.position.set(0, 2, 0);
+            playerBody.add(lantern);
+
+            // Spawn Portal
+            let px = mazeSize-2, py = mazeSize-2;
+            while(mapData[py][px] === 1) { px--; py--; }
+            const pGeo = new THREE.TorusGeometry(2, 0.2, 8, 20);
+            portal = new THREE.Mesh(pGeo, new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+            portal.position.set(px*TILE_SIZE, 3, py*TILE_SIZE);
+            scene.add(portal);
+
+            // Enemies
+            for(let i=0; i<gameLevel+3; i++) spawnEnemy();
+        }
+
+        function spawnEnemy() {
+            let ex, ez;
+            do {
+                ex = Math.floor(Math.random()*mazeSize);
+                ez = Math.floor(Math.random()*mazeSize);
+            } while(mapData[ez][ex]===1 || Math.hypot(ex*TILE_SIZE-playerBody.position.x, ez*TILE_SIZE-playerBody.position.z) < 20);
+
+            const mesh = new THREE.Mesh(
+                new THREE.DodecahedronGeometry(2), 
+                new THREE.MeshStandardMaterial({ color: 0xff0000, wireframe: true, emissive: 0x550000 })
+            );
+            mesh.position.set(ex*TILE_SIZE, 2, ez*TILE_SIZE);
+            scene.add(mesh);
+            enemies.push({ mesh: mesh, hp: 5 });
+        }
+
+        // --- SHOOTING FIX (Raycast from Camera Center) ---
+        function shoot() {
+            playTone(150, 'sawtooth', 0.1, 0.3);
+
+            // Muzzle Flash
+            const flash = new THREE.PointLight(0xffff00, 2, 5);
+            flash.position.set(0.5, -0.5, -1);
+            playerHead.add(flash);
+            setTimeout(() => playerHead.remove(flash), 50);
+
+            const ray = new THREE.Raycaster();
+            // We cast from center of screen (0,0)
+            ray.setFromCamera(new THREE.Vector2(0,0), camera);
+            
+            const hits = ray.intersectObjects(enemies.map(e=>e.mesh));
+
+            if(hits.length > 0) {
+                const hitObj = hits[0].object;
+                const dist = hits[0].distance;
+                
+                if(dist < 50) { // Range
+                    const enemy = enemies.find(e => e.mesh === hitObj);
+                    if(enemy) {
+                        enemy.hp -= 2; // Damage
+                        playTone(50, 'square', 0.1, 0.4); // Hit Sound
+                        
+                        // Visual Hit Feedback
+                        const marker = document.getElementById('hit-feedback');
+                        marker.style.opacity = 1;
+                        setTimeout(() => marker.style.opacity = 0, 100);
+
+                        // Knockback
+                        const pushDir = hits[0].ray.direction.clone().multiplyScalar(2);
+                        enemy.mesh.position.add(pushDir);
+
+                        if(enemy.hp <= 0) {
+                            scene.remove(enemy.mesh);
+                            enemies = enemies.filter(e => e !== enemy);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- COLLISION LOGIC ---
+        function checkCollision(x, z) {
+            // Check boundaries
+            const gx = Math.floor((x + TILE_SIZE/2) / TILE_SIZE);
+            const gy = Math.floor((z + TILE_SIZE/2) / TILE_SIZE);
+            
+            // World Bounds
+            if(gx < 0 || gx >= mazeSize || gy < 0 || gy >= mazeSize) return true;
+            
+            // Wall Collision (Check the exact map grid)
+            return mapData[gy][gx] === 1;
+        }
+
+        // --- LOOP ---
+        function loop() {
+            requestAnimationFrame(loop);
+            const time = performance.now();
+            const delta = Math.min((time - prevTime)/1000, 0.1);
+            prevTime = time;
+
+            if(!isLocked) return;
+
+            // MOVEMENT (Fixed to be Relative to Rotation)
+            // 1. Deceleration (Friction)
+            velocity.x -= velocity.x * 10.0 * delta;
+            velocity.z -= velocity.z * 10.0 * delta;
+
+            // 2. Input Direction
+            const direction = new THREE.Vector3();
+            direction.z = Number(moveFwd) - Number(moveBwd);
+            direction.x = Number(moveRight) - Number(moveLeft);
+            direction.normalize(); // Ensure diagonal isn't faster
+
+            // 3. Apply Speed
+            if (moveFwd || moveBwd) velocity.z -= direction.z * 400.0 * delta;
+            if (moveLeft || moveRight) velocity.x -= direction.x * 400.0 * delta;
+
+            // 4. Calculate proposed move (LOCAL SPACE)
+            const moveX = -velocity.x * delta;
+            const moveZ = -velocity.z * delta;
+
+            // 5. Convert Local to World
+            // We use the BODY rotation only (Yaw), not the head pitch
+            const intendedMove = new THREE.Vector3(moveX, 0, moveZ);
+            intendedMove.applyEuler(new THREE.Euler(0, playerBody.rotation.y, 0));
+
+            // 6. Collision & Application
+            // Try X Movement
+            if(!checkCollision(playerBody.position.x + intendedMove.x, playerBody.position.z)) {
+                playerBody.position.x += intendedMove.x;
+            }
+            // Try Z Movement
+            if(!checkCollision(playerBody.position.x, playerBody.position.z + intendedMove.z)) {
+                playerBody.position.z += intendedMove.z;
+            }
+
+            // Portal
+            portal.rotation.y += delta;
+            if(playerBody.position.distanceTo(portal.position) < 5) {
+                gameLevel++;
+                document.getElementById('hud').innerText = `HP: ${playerHP} | LVL: ${gameLevel}`;
+                startLevel();
+            }
+
+            // Enemy AI
+            enemies.forEach(e => {
+                e.mesh.rotation.x += delta;
+                e.mesh.rotation.y += delta;
+                const vec = new THREE.Vector3().subVectors(playerBody.position, e.mesh.position);
+                const dist = vec.length();
+                
+                if(dist < 40) { // Chase radius
+                    vec.normalize();
+                    const nextX = e.mesh.position.x + vec.x * delta * 8; // Speed
+                    const nextZ = e.mesh.position.z + vec.z * delta * 8;
+                    
+                    if(!checkCollision(nextX, e.mesh.position.z)) e.mesh.position.x = nextX;
+                    if(!checkCollision(e.mesh.position.x, nextZ)) e.mesh.position.z = nextZ;
+                }
+
+                if(dist < 3) { // Damage
+                    playerHP -= 0.5;
+                    document.getElementById('hud').innerText = `HP: ${Math.floor(playerHP)} | LVL: ${gameLevel}`;
+                    if(playerHP <= 0) {
+                        alert("GAME OVER");
+                        location.reload();
+                    }
+                }
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>

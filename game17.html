@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Procedural FPS: Phase 17 (Critical Systems)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050510; font-family: 'Courier New', monospace; user-select: none; }
+        
+        /* LAYERS */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: hidden; }
+        #text-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 12; }
+        
+        /* POST FX */
+        #scanlines { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03)); background-size: 100% 4px, 6px 100%; pointer-events: none; z-index: 20; }
+        #vignette { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, transparent 70%, rgba(0,0,0,0.6) 150%); pointer-events: none; z-index: 15; }
+        #damage-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, transparent 50%, red 150%); opacity: 0; transition: opacity 0.1s; pointer-events: none; z-index: 16; }
+
+        /* HUD */
+        #hud { position: absolute; bottom: 20px; left: 20px; color: #0f0; font-size: 24px; font-weight: bold; text-shadow: 0 0 5px #0f0; }
+        #buff-indicator { position: absolute; bottom: 60px; left: 20px; color: #0ff; font-size: 20px; font-weight: bold; text-shadow: 0 0 5px #0ff; display: none; }
+        
+        /* DYNAMIC CROSSHAIR */
+        #crosshair { 
+            position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; 
+            background: #0f0; transform: translate(-50%, -50%); 
+            border-radius: 50%; box-shadow: 0 0 4px #0f0; 
+            transition: width 0.1s, height 0.1s; /* Smooth expansion */
+        }
+        
+        #boss-container { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); width: 400px; height: 30px; border: 2px solid #f00; display: none; background: rgba(50,0,0,0.5); }
+        #boss-bar { width: 100%; height: 100%; background: #f00; transition: width 0.1s; }
+        #boss-label { position: absolute; top: -25px; left: 0; color: #f00; font-weight: bold; width: 100%; text-align: center; }
+
+        #minimap-container { position: absolute; top: 20px; right: 20px; border: 2px solid #0f0; background: rgba(0,0,0,0.8); width: 150px; height: 150px; }
+        #minimap { width: 100%; height: 100%; display: block; }
+        #arrow-container { position: absolute; top: 100px; left: 50%; transform: translateX(-50%); display: none; }
+        #arrow { width: 0; height: 0; border-left: 15px solid transparent; border-right: 15px solid transparent; border-bottom: 40px solid #0f0; filter: drop-shadow(0 0 5px #0f0); transform-origin: 50% 50%; }
+
+        /* DAMAGE NUMBERS */
+        .dmg-num {
+            position: absolute; color: #fff; font-weight: bold; font-size: 20px;
+            text-shadow: 1px 1px 0 #000; pointer-events: none;
+            animation: floatUp 0.8s ease-out forwards;
+        }
+        .crit { color: #ff0; font-size: 32px; text-shadow: 0 0 10px #ff0; }
+        @keyframes floatUp {
+            0% { opacity: 1; transform: translateY(0) scale(1); }
+            100% { opacity: 0; transform: translateY(-50px) scale(1.2); }
+        }
+
+        /* SCREENS */
+        .screen { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; text-align: center; background: rgba(0,0,0,0.9); padding: 40px; border: 2px solid #0f0; min-width: 300px; z-index: 30; cursor: pointer; }
+        #pause-screen, #game-over { display: none; border-color: #ffaa00; color: #ffaa00; }
+        #game-over h1 { color: red; margin: 0 0 10px 0; text-shadow: 0 0 10px red; }
+    </style>
+</head>
+<body>
+    <div id="scanlines"></div>
+    <div id="vignette"></div>
+    <div id="damage-overlay"></div>
+    
+    <div id="text-layer"></div>
+
+    <div id="ui-layer">
+        <div id="hud">HP: 100 | SCORE: 0</div>
+        <div id="buff-indicator">⚡ OVERCHARGE ACTIVE ⚡</div>
+        <div id="crosshair"></div>
+        <div id="boss-container"><div id="boss-label">⚠ TITAN DETECTED ⚠</div><div id="boss-bar"></div></div>
+        <div id="minimap-container"><canvas id="minimap"></canvas></div>
+        <div id="arrow-container"><div id="arrow"></div></div>
+    </div>
+
+    <div id="instr" class="screen">
+        <h2 style="color:#0f0; margin-top:0;">PHASE 17: CRITICAL</h2>
+        &gt; HOLD SHIFT TO SPRINT (CANNOT SHOOT)<br>
+        &gt; AIM FOR WEAK POINTS<br>
+        &gt; SURVIVE<br><br>
+        <b>CLICK TO ENGAGE</b>
+    </div>
+    <div id="pause-screen" class="screen"><h2>SYSTEM PAUSED</h2><b>CLICK TO RESUME</b></div>
+    
+    <div id="game-over" class="screen">
+        <h1>SYSTEM FAILURE</h1>
+        <p id="final-stats"></p>
+        <br><b>CLICK TO REBOOT</b>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const BASE_SPEED = 25.0, SPRINT_SPEED = 45.0, LOOK_SENS = 0.002, TILE_SIZE = 10;
+        let scene, camera, renderer, playerBody, playerHead, gunGroup;
+        let particles=[], enemies=[], crates=[], pickups=[], mapData=[];
+        let moveFwd=0, moveBwd=0, moveLeft=0, moveRight=0, isSprinting=false;
+        let prevTime = performance.now();
+        let isLocked = false, isDead = false, mazeSize = 15, gameLevel = 1;
+        let player = { hp: 100, score: 0 };
+        let portal, damageOpacity = 0, isBossLevel = false, screenShake = 0;
+        let lastShot = 0, fireRate = 150, buffTimer = 0, isFiring = false;
+
+        const ctxMap = document.getElementById('minimap').getContext('2d');
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function sfx(type) {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            const t = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            
+            if (type === 'shoot') {
+                osc.type='sawtooth'; osc.frequency.setValueAtTime(buffTimer>0?200:110,t); 
+                osc.frequency.exponentialRampToValueAtTime(0.01,t+0.1);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.exponentialRampToValueAtTime(0.01,t+0.1);
+                osc.start(t); osc.stop(t+0.1);
+            } else if (type === 'exp') { 
+                osc.type='square'; osc.frequency.setValueAtTime(100,t); osc.frequency.exponentialRampToValueAtTime(0.01,t+0.3);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.exponentialRampToValueAtTime(0.01,t+0.3);
+                osc.start(t); osc.stop(t+0.3);
+            } else if (type === 'pickup') {
+                osc.type='sine'; osc.frequency.setValueAtTime(400,t); osc.frequency.linearRampToValueAtTime(800,t+0.2);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.linearRampToValueAtTime(0,t+0.2);
+                osc.start(t); osc.stop(t+0.2);
+            } else if (type === 'hit_player') {
+                osc.type='sine'; osc.frequency.setValueAtTime(100,t); osc.frequency.linearRampToValueAtTime(50,t+0.1);
+                gain.gain.setValueAtTime(0.5,t); gain.gain.linearRampToValueAtTime(0,t+0.1);
+                osc.start(t); osc.stop(t+0.1);
+            } else if (type === 'death') {
+                osc.type='sawtooth'; osc.frequency.setValueAtTime(200,t); osc.frequency.exponentialRampToValueAtTime(10,t+1.0);
+                gain.gain.setValueAtTime(0.5,t); gain.gain.linearRampToValueAtTime(0,t+1.0);
+                osc.start(t); osc.stop(t+1.0);
+            } else if (type === 'crit') {
+                osc.type='triangle'; osc.frequency.setValueAtTime(600,t); osc.frequency.exponentialRampToValueAtTime(800,t+0.1);
+                gain.gain.setValueAtTime(0.3,t); gain.gain.exponentialRampToValueAtTime(0.01,t+0.15);
+                osc.start(t); osc.stop(t+0.15);
+            }
+        }
+
+        function genGridTex(color) {
+            const size = 512;
+            const canvas = document.createElement('canvas'); canvas.width=size; canvas.height=size;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#1a1a2e'; ctx.fillRect(0,0,size,size);
+            ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.shadowBlur = 10; ctx.shadowColor = color;
+            ctx.beginPath();
+            for(let i=0; i<=size; i+=64) { ctx.moveTo(i,0); ctx.lineTo(i,size); ctx.moveTo(0,i); ctx.lineTo(size,i); }
+            ctx.stroke();
+            const t = new THREE.CanvasTexture(canvas);
+            t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.RepeatWrapping; t.magFilter = THREE.NearestFilter;
+            return t;
+        }
+
+        function init() {
+            scene = new THREE.Scene(); scene.background = new THREE.Color(0x050510); scene.fog = new THREE.FogExp2(0x050510, 0.025);
+            playerBody = new THREE.Group(); scene.add(playerBody);
+            playerHead = new THREE.Group(); playerHead.position.y = 4; playerBody.add(playerHead);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            playerHead.add(camera);
+
+            gunGroup = new THREE.Group();
+            const gunMat = new THREE.MeshStandardMaterial({ color: 0x888, roughness: 0.3, metalness: 0.8 });
+            const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 1.5), gunMat);
+            barrel.position.set(0.25, -0.3, -0.5); gunGroup.add(barrel);
+            const sight = new THREE.Mesh(new THREE.BoxGeometry(0.05,0.05,0.1), new THREE.MeshBasicMaterial({color:0x00ff00}));
+            sight.position.set(0.25, -0.1, -1.2); gunGroup.add(sight);
+            playerHead.add(gunGroup);
+
+            scene.add(new THREE.AmbientLight(0x808080));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5); dirLight.position.set(0, 50, 0); scene.add(dirLight);
+            const flash = new THREE.PointLight(0x00ff00, 1, 40); flash.position.set(0,0,0); playerBody.add(flash);
+
+            renderer = new THREE.WebGLRenderer({antialias:true});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            resetLevel();
+
+            document.body.onclick = () => { 
+                if(isDead) { resetGame(); return; }
+                document.body.requestPointerLock(); 
+            };
+            document.addEventListener('pointerlockchange', () => { 
+                isLocked = document.pointerLockElement === document.body;
+                if(isDead) return;
+                if(isLocked) {
+                    document.getElementById('instr').style.display = 'none';
+                    document.getElementById('pause-screen').style.display = 'none';
+                    prevTime = performance.now();
+                } else { document.getElementById('pause-screen').style.display = 'block'; }
+            });
+            document.addEventListener('mousedown', () => { if(isLocked && !isDead) isFiring = true; });
+            document.addEventListener('mouseup', () => { isFiring = false; });
+            document.addEventListener('mousemove', e => {
+                if(isLocked && !isDead) {
+                    playerBody.rotation.y -= e.movementX * LOOK_SENS;
+                    playerHead.rotation.x -= e.movementY * LOOK_SENS;
+                    playerHead.rotation.x = Math.max(-1.5, Math.min(1.5, playerHead.rotation.x));
+                }
+            });
+            document.addEventListener('keydown', e => onKey(e.code, 1));
+            document.addEventListener('keyup', e => onKey(e.code, 0));
+            animate();
+        }
+
+        function onKey(k,v) {
+            if(k=='KeyW') moveFwd=v; if(k=='KeyS') moveBwd=v;
+            if(k=='KeyA') moveLeft=v; if(k=='KeyD') moveRight=v;
+            if(k=='ShiftLeft' || k=='ShiftRight') isSprinting=v;
+        }
+
+        function genMaze(s) {
+            let m=Array(s).fill().map(()=>Array(s).fill(1));
+            function d(x,y){
+                m[y][x]=0;
+                [[0,-2],[0,2],[-2,0],[2,0]].sort(()=>Math.random()-.5).forEach(([dx,dy])=>{
+                    let nx=x+dx,ny=y+dy;
+                    if(nx>0&&nx<s-1&&ny>0&&ny<s-1&&m[ny][nx]){ m[y+dy/2][x+dx/2]=0; d(nx,ny); }
+                });
+            }
+            d(1,1); m[1][1]=0; m[1][2]=0; return m;
+        }
+
+        function genArena(s) {
+            let m=Array(s).fill().map(()=>Array(s).fill(1));
+            for(let y=1; y<s-1; y++) for(let x=1; x<s-1; x++) { m[y][x] = 0; if(x%4===0 && y%4===0) m[y][x] = 1; }
+            return m;
+        }
+
+        function resetGame() {
+            isDead = false; player.hp = 100; player.score = 0; gameLevel = 1;
+            document.getElementById('game-over').style.display = 'none';
+            document.getElementById('damage-overlay').style.opacity = 0;
+            resetLevel();
+            document.body.requestPointerLock();
+        }
+
+        function gameOver() {
+            isDead = true; isLocked = false;
+            document.exitPointerLock();
+            sfx('death');
+            document.getElementById('final-stats').innerHTML = `LEVEL REACHED: ${gameLevel}<br>SCORE: ${player.score}`;
+            document.getElementById('game-over').style.display = 'block';
+        }
+
+        function resetLevel() {
+            enemies.forEach(e=>scene.remove(e.mesh)); enemies=[];
+            crates.forEach(c=>scene.remove(c)); crates=[];
+            pickups.forEach(p=>scene.remove(p)); pickups=[];
+            if(scene.mapRoot) scene.remove(scene.mapRoot);
+            if(portal) scene.remove(portal); portal=null;
+            particles = [];
+            
+            // Clear floating text
+            document.getElementById('text-layer').innerHTML = '';
+
+            isBossLevel = (gameLevel % 3 === 0);
+            document.getElementById('boss-container').style.display = isBossLevel ? 'block' : 'none';
+            document.getElementById('arrow-container').style.display = 'none';
+            
+            mazeSize = isBossLevel ? 20 : 10 + (gameLevel * 2);
+            mapData = isBossLevel ? genArena(mazeSize) : genMaze(mazeSize);
+            
+            scene.mapRoot = new THREE.Group();
+            scene.add(scene.mapRoot);
+
+            const texFloor = genGridTex('#00ffff'); const texWall = genGridTex('#ff00ff');
+            const matW = new THREE.MeshStandardMaterial({map: texWall, color: 0xffffff, emissive: 0x440044, roughness: 0.2});
+            const matF = new THREE.MeshStandardMaterial({map: texFloor, color: 0xffffff, emissive: 0x004444, roughness: 0.2});
+            const geo = new THREE.BoxGeometry(TILE_SIZE, 12, TILE_SIZE);
+
+            for(let y=0; y<mazeSize; y++) {
+                for(let x=0; x<mazeSize; x++) {
+                    if(mapData[y][x]) {
+                        const w = new THREE.Mesh(geo, matW); w.position.set(x*TILE_SIZE, 6, y*TILE_SIZE); scene.mapRoot.add(w);
+                    } else {
+                        const f = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE,TILE_SIZE), matF);
+                        f.rotation.x = -Math.PI/2; f.position.set(x*TILE_SIZE,0,y*TILE_SIZE); scene.mapRoot.add(f);
+                        const c = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE,TILE_SIZE), matF);
+                        c.rotation.x = Math.PI/2; c.position.set(x*TILE_SIZE,12,y*TILE_SIZE); scene.mapRoot.add(c);
+                    }
+                }
+            }
+
+            playerBody.position.set(TILE_SIZE*1.5, 0, TILE_SIZE*1.5);
+            playerBody.rotation.y = 0;
+            
+            if(isBossLevel) { spawnBoss(); sfx('boss_roar'); } 
+            else { 
+                const count = 5 + gameLevel;
+                for(let i=0; i<count; i++) {
+                    if(Math.random() > 0.7) spawnEnemy('seeker');
+                    else spawnEnemy('grunt');
+                }
+            }
+            if(!isBossLevel) for(let i=0; i<4; i++) spawnCrate();
+            updateHUD();
+        }
+
+        function spawnEnemy(type) {
+            let ex, ez;
+            do { ex=Math.floor(Math.random()*mazeSize); ez=Math.floor(Math.random()*mazeSize); } 
+            while(mapData[ez][ex] || Math.hypot(ex*TILE_SIZE-playerBody.position.x, ez*TILE_SIZE-playerBody.position.z)<30);
+            
+            const g = new THREE.Group();
+            let body, wire;
+            if(type === 'seeker') {
+                body = new THREE.Mesh(new THREE.TetrahedronGeometry(1.5), new THREE.MeshStandardMaterial({color:0xffff00}));
+                wire = new THREE.Mesh(new THREE.TetrahedronGeometry(1.6), new THREE.MeshBasicMaterial({color:0xffaa00, wireframe:true}));
+                g.userData = { hp: 1, type: 'seeker', speed: 18 }; 
+                g.position.set(ex*TILE_SIZE, 3, ez*TILE_SIZE);
+            } else {
+                body = new THREE.Mesh(new THREE.DodecahedronGeometry(2), new THREE.MeshStandardMaterial({color:0x222222}));
+                wire = new THREE.Mesh(new THREE.DodecahedronGeometry(2.1), new THREE.MeshBasicMaterial({color:0xff3333, wireframe:true}));
+                g.userData = { hp: 3, type: 'grunt', speed: 12 };
+                g.position.set(ex*TILE_SIZE, 4, ez*TILE_SIZE);
+            }
+            g.add(body); g.add(wire);
+            scene.add(g); enemies.push(g);
+        }
+
+        function spawnBoss() {
+            let cx = Math.floor(mazeSize/2), cz = Math.floor(mazeSize/2);
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.IcosahedronGeometry(6, 0), new THREE.MeshStandardMaterial({color:0x442222}));
+            const wire = new THREE.Mesh(new THREE.IcosahedronGeometry(6.2, 0), new THREE.MeshBasicMaterial({color:0xff8800, wireframe:true}));
+            g.add(body); g.add(wire);
+            g.userData = { hp: 50, maxHp: 50, type: 'titan', speed: 8 };
+            g.position.set(cx*TILE_SIZE, 8, cz*TILE_SIZE);
+            scene.add(g); enemies.push(g);
+            updateBossBar(50, 50);
+        }
+
+        function spawnCrate() {
+            let cx, cz;
+            do { cx=Math.floor(Math.random()*mazeSize); cz=Math.floor(Math.random()*mazeSize); } while(mapData[cz][cx]);
+            const mat = new THREE.MeshStandardMaterial({color:0x00ffff, roughness:0.2, emissive:0x0088aa, emissiveIntensity: 0.5});
+            const crate = new THREE.Mesh(new THREE.BoxGeometry(3,3,3), mat);
+            crate.position.set(cx*TILE_SIZE, 1.5, cz*TILE_SIZE);
+            crate.userData = { hp: 2, type: 'crate' };
+            scene.add(crate); crates.push(crate);
+        }
+
+        function spawnPickup(pos) {
+            const isMedkit = Math.random() > 0.5;
+            const geo = new THREE.BoxGeometry(1,1,1);
+            const mat = new THREE.MeshBasicMaterial({color: isMedkit?0xff0000:0x00ffff, wireframe:true});
+            const p = new THREE.Mesh(geo, mat); p.position.copy(pos);
+            p.userData = { type: isMedkit?'medkit':'ammo', val: 25 };
+            scene.add(p); pickups.push(p);
+        }
+
+        function spawnPortal() {
+            const geo = new THREE.TorusKnotGeometry(1.5, 0.4, 64, 8);
+            const mat = new THREE.MeshBasicMaterial({color: 0x55ff55, wireframe: true});
+            portal = new THREE.Mesh(geo, mat);
+            let px, pz, valid=false;
+            while(!valid) {
+                px = Math.floor(Math.random() * mazeSize); pz = Math.floor(Math.random() * mazeSize);
+                if(mapData[pz][px] === 0 && Math.hypot(px*TILE_SIZE - playerBody.position.x, pz*TILE_SIZE - playerBody.position.z) > 40) valid = true;
+            }
+            portal.position.set(px*TILE_SIZE, 2, pz*TILE_SIZE);
+            scene.add(portal);
+            document.getElementById('hud').innerText += " | PORTAL OPEN!";
+            document.getElementById('arrow-container').style.display = 'block';
+        }
+
+        // --- NEW: FLOATING DAMAGE TEXT ---
+        function spawnDamageNum(pos, val, isCrit) {
+            const div = document.createElement('div');
+            div.className = isCrit ? 'dmg-num crit' : 'dmg-num';
+            div.innerText = val;
+            document.getElementById('text-layer').appendChild(div);
+            
+            // 3D to 2D Projection
+            const vec = pos.clone().project(camera);
+            const x = (vec.x * .5 + .5) * window.innerWidth;
+            const y = (-(vec.y * .5) + .5) * window.innerHeight;
+            
+            div.style.left = x + 'px';
+            div.style.top = y + 'px';
+            
+            // Auto remove
+            setTimeout(() => div.remove(), 800);
+        }
+
+        function shoot() {
+            if(isSprinting) return; // No shooting while running
+            const now = performance.now();
+            if(now - lastShot < (buffTimer > 0 ? 50 : 150)) return;
+            lastShot = now;
+            sfx('shoot');
+            gunGroup.position.z += 0.5; screenShake = 0.2; 
+            const flash = new THREE.PointLight(buffTimer>0?0x00ffff:0x00ff00, 5, 10);
+            flash.position.set(0.25, -0.3, -2); playerHead.add(flash);
+            setTimeout(()=>playerHead.remove(flash), 50);
+
+            const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2(0,0), camera);
+            const hits = ray.intersectObjects(enemies.map(e=>e.children[0]).concat(crates));
+            
+            if(hits.length>0 && hits[0].distance < 80) { 
+                const obj = hits[0].object;
+                
+                // Crit Logic (Random chance)
+                const isCrit = Math.random() > 0.8;
+                const damage = isCrit ? 3 : 1; 
+
+                if(crates.includes(obj)) {
+                    obj.userData.hp--; obj.material.emissive.setHex(0xffffff); setTimeout(()=>obj.material.emissive.setHex(0x0088aa), 50);
+                    spawnDamageNum(hits[0].point, 1, false); // Crates don't crit
+                    if(obj.userData.hp <= 0) {
+                        spawnParticles(obj.position, 0x00ffff, 10); spawnPickup(obj.position); sfx('exp');
+                        player.score += 50;
+                        scene.remove(obj); crates = crates.filter(c=>c!==obj);
+                    }
+                    updateHUD(); return;
+                }
+                const parent = obj.parent;
+                if(parent) {
+                    parent.userData.hp -= damage; 
+                    obj.material.emissive = new THREE.Color(0xffffff); setTimeout(()=>obj.material.emissive = new THREE.Color(0x000000), 50);
+                    
+                    spawnDamageNum(hits[0].point, damage*100, isCrit);
+                    if(isCrit) sfx('crit');
+
+                    if(parent.userData.type === 'titan') updateBossBar(parent.userData.hp, parent.userData.maxHp);
+                    if(parent.userData.hp <= 0) {
+                        spawnParticles(parent.position, parent.userData.type==='titan'?0xffaa00:0xff0000, 15);
+                        sfx('exp'); scene.remove(parent); enemies = enemies.filter(e=>e!==parent);
+                        
+                        // Scoring
+                        if(parent.userData.type === 'grunt') player.score += 100;
+                        else if(parent.userData.type === 'seeker') player.score += 150;
+                        else if(parent.userData.type === 'titan') player.score += 1000;
+
+                        updateHUD(); if(enemies.length === 0) spawnPortal();
+                    }
+                }
+            }
+        }
+        
+        function spawnParticles(pos, color, count) {
+            const mat = new THREE.MeshBasicMaterial({color: color});
+            const geo = new THREE.BoxGeometry(0.5,0.5,0.5);
+            for(let i=0; i<count; i++) {
+                const m = new THREE.Mesh(geo, mat); m.position.copy(pos);
+                m.userData = { vel: new THREE.Vector3((Math.random()-.5)*30, (Math.random()-.5)*30, (Math.random()-.5)*30), life: 1.0 };
+                scene.add(m); particles.push(m);
+            }
+        }
+
+        function updateBossBar(hp, max) { document.getElementById('boss-bar').style.width = (hp/max*100) + '%'; }
+        function checkCol(x, z) {
+            const gx=Math.floor((x+TILE_SIZE/2)/TILE_SIZE), gz=Math.floor((z+TILE_SIZE/2)/TILE_SIZE);
+            return gx<0||gx>=mazeSize||gz<0||gz>=mazeSize||mapData[gz][gx];
+        }
+
+        function updateMinimap() {
+            ctxMap.fillStyle = '#000'; ctxMap.fillRect(0,0,300,300);
+            const cellW = 300 / mazeSize;
+            for(let y=0; y<mazeSize; y++) for(let x=0; x<mazeSize; x++) if(mapData[y][x]===1) {
+                ctxMap.fillStyle = '#440044'; ctxMap.fillRect(x*cellW, y*cellW, cellW, cellW);
+            }
+            const px = (playerBody.position.x / TILE_SIZE) * cellW; const py = (playerBody.position.z / TILE_SIZE) * cellW;
+            ctxMap.fillStyle = '#0f0'; ctxMap.beginPath(); ctxMap.arc(px, py, 3, 0, Math.PI*2); ctxMap.fill();
+            ctxMap.fillStyle = '#f00'; enemies.forEach(e => {
+                const ex = (e.position.x / TILE_SIZE) * cellW; const ey = (e.position.z / TILE_SIZE) * cellW;
+                ctxMap.beginPath(); ctxMap.arc(ex, ey, e.userData.type==='titan'?6:2, 0, Math.PI*2); ctxMap.fill();
+            });
+            ctxMap.fillStyle = '#0ff'; crates.forEach(c => { ctxMap.fillRect((c.position.x/TILE_SIZE)*cellW - 2, (c.position.z/TILE_SIZE)*cellW - 2, 4, 4); });
+            if(portal) {
+                const pox = (portal.position.x / TILE_SIZE) * cellW; const poy = (portal.position.z / TILE_SIZE) * cellW;
+                ctxMap.fillStyle = '#00f'; ctxMap.beginPath(); ctxMap.arc(pox, poy, 4, 0, Math.PI*2); ctxMap.fill();
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if(isDead) return;
+
+            const now = performance.now();
+            const delta = Math.min((now - prevTime)/1000, 0.1);
+            prevTime = now;
+
+            if(damageOpacity > 0) { damageOpacity -= delta * 1.5; document.getElementById('damage-overlay').style.opacity = damageOpacity; }
+            if(screenShake > 0) {
+                screenShake -= delta * 2;
+                playerHead.position.x = (Math.random()-0.5) * screenShake;
+                playerHead.position.y = 4 + (Math.random()-0.5) * screenShake;
+                document.getElementById('ui-layer').style.transform = `translate(${Math.random()*2}px, ${Math.random()*2}px)`;
+            } else { playerHead.position.set(0,4,0); document.getElementById('ui-layer').style.transform = 'none'; }
+
+            if(isLocked) {
+                if(isFiring && !isSprinting) shoot();
+                if(buffTimer > 0) {
+                    buffTimer -= delta;
+                    document.getElementById('buff-indicator').style.display = 'block';
+                    if(buffTimer <= 0) document.getElementById('buff-indicator').style.display = 'none';
+                }
+
+                document.getElementById('minimap').width = 300; document.getElementById('minimap').height = 300;
+                updateMinimap();
+
+                for(let i=particles.length-1; i>=0; i--) {
+                    const p = particles[i];
+                    p.position.add(p.userData.vel.clone().multiplyScalar(delta));
+                    p.userData.life -= delta * 2;
+                    p.scale.setScalar(p.userData.life);
+                    if(p.userData.life <= 0) { scene.remove(p); particles.splice(i,1); }
+                }
+
+                let mx=0, mz=0;
+                // SPRINT LOGIC
+                const speed = isSprinting ? SPRINT_SPEED : BASE_SPEED;
+                // Crosshair expansion
+                const ch = document.getElementById('crosshair');
+                if(moveFwd || moveBwd || moveLeft || moveRight) {
+                    ch.style.width = isSprinting ? '20px' : '10px';
+                    ch.style.height = isSprinting ? '20px' : '10px';
+                } else {
+                    ch.style.width = '4px'; ch.style.height = '4px';
+                }
+
+                if(moveFwd) mz -= speed*delta; if(moveBwd) mz += speed*delta;
+                if(moveLeft) mx -= speed*delta; if(moveRight) mx += speed*delta;
+                const moveVec = new THREE.Vector3(mx, 0, mz);
+                moveVec.applyEuler(new THREE.Euler(0, playerBody.rotation.y, 0));
+                if(!checkCol(playerBody.position.x+moveVec.x, playerBody.position.z)) playerBody.position.x += moveVec.x;
+                if(!checkCol(playerBody.position.x, playerBody.position.z+moveVec.z)) playerBody.position.z += moveVec.z;
+
+                // Weapon Sway (Increase if sprinting)
+                gunGroup.position.z += (0 - gunGroup.position.z) * delta * 5;
+                if(mx!==0 || mz!==0) {
+                    const sway = isSprinting ? 0.15 : 0.05;
+                    const freq = isSprinting ? 0.02 : 0.01;
+                    gunGroup.position.y = Math.sin(now * freq) * sway;
+                    gunGroup.position.x = Math.cos(now * freq) * sway;
+                    // Lower gun when sprinting
+                    if(isSprinting) gunGroup.rotation.x = -0.5; else gunGroup.rotation.x = 0;
+                } else {
+                    gunGroup.rotation.x = 0;
+                }
+
+                pickups.forEach((p, idx) => {
+                    p.rotation.y += delta; p.position.y = 1.5 + Math.sin(now*0.005)*0.5;
+                    if(p.position.distanceTo(playerBody.position) < 2.5) {
+                        sfx('pickup');
+                        if(p.userData.type === 'medkit') player.hp = Math.min(100, player.hp + 25);
+                        if(p.userData.type === 'ammo') buffTimer = 10.0;
+                        scene.remove(p); pickups.splice(idx, 1);
+                        updateHUD();
+                    }
+                });
+
+                enemies.forEach(e => {
+                    const type = e.userData.type;
+                    e.rotation.y += delta;
+                    e.children[1].rotation.z -= delta*2;
+                    
+                    if(type === 'seeker') e.rotation.x += delta * 2;
+
+                    const dist = e.position.distanceTo(playerBody.position);
+                    const aggro = type==='titan' ? 80 : 40;
+                    if(dist < aggro) {
+                        const dir = new THREE.Vector3().subVectors(playerBody.position, e.position).normalize();
+                        const nextX = e.position.x + dir.x * delta * e.userData.speed;
+                        const nextZ = e.position.z + dir.z * delta * e.userData.speed;
+                        if(!checkCol(nextX, e.position.z)) e.position.x = nextX;
+                        if(!checkCol(e.position.x, nextZ)) e.position.z = nextZ;
+                    }
+                    
+                    const hitDist = type==='titan' ? 10.0 : (type==='seeker' ? 2.5 : 6.0);
+                    
+                    if(dist < hitDist) { 
+                        if(type === 'seeker') {
+                            spawnParticles(e.position, 0xffff00, 20); sfx('exp');
+                            scene.remove(e); enemies = enemies.filter(en => en !== e);
+                            player.hp -= 40; sfx('hit_player'); damageOpacity = 0.8; screenShake = 1.0;
+                            updateHUD(); if(player.hp<=0) gameOver();
+                        } else if(damageOpacity <= 0) {
+                            player.hp -= type==='titan' ? 30 : 10; sfx('hit_player');
+                            damageOpacity = 0.8; screenShake = 1.0; 
+                            updateHUD(); if(player.hp<=0) gameOver();
+                        }
+                    }
+                });
+
+                if(portal) {
+                    portal.rotation.x += delta; portal.rotation.y += delta;
+                    if(playerBody.position.distanceTo(portal.position) < 3) { gameLevel++; player.hp=100; resetLevel(); }
+                    if(enemies.length === 0) {
+                        const dx = portal.position.x - playerBody.position.x;
+                        const dz = portal.position.z - playerBody.position.z;
+                        const angle = Math.atan2(dx, dz);
+                        const rotation = (playerBody.rotation.y - angle) * (180 / Math.PI);
+                        document.getElementById('arrow').style.transform = `rotate(${rotation + 180}deg)`;
+                    }
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        
+        function updateHUD() { document.getElementById('hud').innerText = `HP: ${Math.floor(player.hp)} | SCORE: ${player.score}`; }
+
+        init();
+    </script>
+</body>
+</html>

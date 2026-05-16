@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Procedural FPS: Phase 7 (Cyber-Hunter)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; }
+        
+        /* RETRO HUD STYLING */
+        #hud-container { position: absolute; bottom: 20px; left: 20px; width: 300px; }
+        .hud-bar { height: 20px; background: #333; margin-top: 5px; border: 2px solid #fff; position: relative; }
+        .hud-fill { height: 100%; background: #0ff; width: 100%; transition: width 0.2s; }
+        #score { color: #f0f; font-size: 32px; font-weight: bold; text-shadow: 2px 2px #000; }
+        
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: #fff; transform: translate(-50%, -50%); box-shadow: 0 0 10px #fff; pointer-events: none; }
+        
+        #hit-marker { position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; border: 3px solid #f00; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; transition: opacity 0.05s; pointer-events: none; border-radius: 50%; }
+
+        #instr { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #0ff; text-align: center; background: rgba(0,0,0,0.9); padding: 40px; border: 4px solid #f0f; font-size: 20px; cursor: pointer; box-shadow: 0 0 20px #f0f; }
+    </style>
+</head>
+<body>
+    <div id="hud-container">
+        <div id="score">LEVEL 1</div>
+        <div class="hud-bar"><div id="hp-bar" class="hud-fill" style="background:#0f0;"></div></div>
+    </div>
+
+    <div id="crosshair"></div>
+    <div id="hit-marker"></div>
+    
+    <div id="instr">
+        <h1 style="margin:0; color:#f0f; text-shadow: 2px 2px #fff;">NEON PROTOCOL</h1><br>
+        WASD to Move<br>CLICK to Shoot<br>Find the <span style="color:#0f0">GREEN PORTAL</span><br><br>
+        <b>CLICK TO START</b>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- CONSTANTS ---
+        const SPEED = 20.0;
+        const SENSITIVITY = 0.002;
+        const TILE = 10;
+        
+        // --- GLOBALS ---
+        let scene, camera, renderer;
+        let playerBody, playerHead, weapon;
+        let move = { f:0, b:0, l:0, r:0 };
+        let prevTime = performance.now();
+        let isLocked = false;
+        let map = [];
+        let enemies = [];
+        let particles = [];
+        let level = 1;
+        let hp = 100;
+        let portal;
+
+        // --- AUDIO (SYNTHWAVE FX) ---
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        function sfx(type) {
+            if(ac.state === 'suspended') ac.resume();
+            const t = ac.currentTime;
+            const o = ac.createOscillator();
+            const g = ac.createGain();
+            o.connect(g); g.connect(ac.destination);
+            
+            if(type==='shoot') {
+                o.type = 'sawtooth';
+                o.frequency.setValueAtTime(800, t); // High laser pitch
+                o.frequency.exponentialRampToValueAtTime(100, t+0.15);
+                g.gain.setValueAtTime(0.1, t);
+                g.gain.exponentialRampToValueAtTime(0.01, t+0.15);
+                o.start(t); o.stop(t+0.15);
+            } else if(type==='step') {
+                o.type = 'triangle';
+                o.frequency.setValueAtTime(50, t);
+                g.gain.setValueAtTime(0.05, t);
+                g.gain.linearRampToValueAtTime(0, t+0.05);
+                o.start(t); o.stop(t+0.05);
+            }
+        }
+
+        // --- GRID TEXTURE GENERATOR ---
+        function gridTex(color) {
+            const c = document.createElement('canvas'); c.width=c.height=128;
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = '#000'; ctx.fillRect(0,0,128,128);
+            ctx.strokeStyle = color; ctx.lineWidth = 4; ctx.strokeRect(0,0,128,128);
+            // Inner cross
+            ctx.globalAlpha = 0.3;
+            ctx.beginPath(); ctx.moveTo(64,0); ctx.lineTo(64,128); ctx.moveTo(0,64); ctx.lineTo(128,64); ctx.stroke();
+            const t = new THREE.CanvasTexture(c);
+            t.magFilter = THREE.NearestFilter;
+            return t;
+        }
+
+        // --- MAZE ---
+        function genMaze(s) {
+            let m = Array(s).fill().map(()=>Array(s).fill(1));
+            function dig(x,y) {
+                m[y][x] = 0;
+                const d = [[0,-2],[0,2],[-2,0],[2,0]].sort(()=>Math.random()-0.5);
+                for(let [dx,dy] of d) {
+                    const nx = x+dx, ny = y+dy;
+                    if(nx>0 && nx<s-1 && ny>0 && ny<s-1 && m[ny][nx]===1) {
+                        m[y+dy/2][x+dx/2] = 0; dig(nx, ny);
+                    }
+                }
+            }
+            dig(1,1);
+            m[1][1]=0; m[1][2]=0; m[2][1]=0;
+            return m;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.05);
+
+            // RIG
+            playerBody = new THREE.Group(); scene.add(playerBody);
+            playerHead = new THREE.Group(); playerHead.position.y = 4; playerBody.add(playerHead);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            playerHead.add(camera);
+
+            // WEAPON MODEL
+            const gunGeo = new THREE.BoxGeometry(0.3, 0.3, 1.0);
+            const gunMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true });
+            weapon = new THREE.Mesh(gunGeo, gunMat);
+            weapon.position.set(0.5, -0.4, -0.8); // Bottom right of screen
+            playerHead.add(weapon);
+
+            // LIGHTS
+            const pLight = new THREE.PointLight(0x00ffff, 0.8, 30);
+            playerBody.add(pLight); // Glow around player
+            scene.add(new THREE.AmbientLight(0x222222));
+
+            renderer = new THREE.WebGLRenderer({antialias:false});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            startLevel();
+
+            // EVENTS
+            document.body.onclick = () => { document.body.requestPointerLock(); if(isLocked) shoot(); };
+            document.addEventListener('pointerlockchange', () => {
+                isLocked = document.pointerLockElement === document.body;
+                document.getElementById('instr').style.display = isLocked ? 'none' : 'block';
+            });
+            document.addEventListener('mousemove', e => {
+                if(isLocked) {
+                    playerBody.rotation.y -= e.movementX * SENSITIVITY;
+                    playerHead.rotation.x -= e.movementY * SENSITIVITY;
+                    playerHead.rotation.x = Math.max(-1.5, Math.min(1.5, playerHead.rotation.x));
+                }
+            });
+            window.onkeydown = e => { if(e.key=='w')move.f=1; if(e.key=='s')move.b=1; if(e.key=='a')move.l=1; if(e.key=='d')move.r=1; };
+            window.onkeyup = e => { if(e.key=='w')move.f=0; if(e.key=='s')move.b=0; if(e.key=='a')move.l=0; if(e.key=='d')move.r=0; };
+
+            loop();
+        }
+
+        function startLevel() {
+            while(scene.map && scene.map.children.length) scene.map.remove(scene.map.children[0]);
+            if(scene.map) scene.remove(scene.map);
+            enemies.forEach(e=>scene.remove(e.mesh)); enemies=[];
+            
+            const size = 15 + (level*2);
+            map = genMaze(size);
+            
+            // BUILD WORLD
+            const grp = new THREE.Group();
+            const matW = new THREE.MeshBasicMaterial({ map: gridTex('#f0f') }); // Magenta Walls
+            const matF = new THREE.MeshBasicMaterial({ map: gridTex('#444') }); // Grey Floor
+            const geo = new THREE.BoxGeometry(TILE, 12, TILE);
+
+            for(let y=0; y<size; y++) {
+                for(let x=0; x<size; x++) {
+                    if(map[y][x]) {
+                        const w = new THREE.Mesh(geo, matW);
+                        w.position.set(x*TILE, 6, y*TILE);
+                        grp.add(w);
+                    } else {
+                        const f = new THREE.Mesh(new THREE.PlaneGeometry(TILE,TILE), matF);
+                        f.rotation.x = -Math.PI/2; f.position.set(x*TILE, 0, y*TILE);
+                        grp.add(f);
+                        const c = new THREE.Mesh(new THREE.PlaneGeometry(TILE,TILE), matF);
+                        c.rotation.x = Math.PI/2; c.position.set(x*TILE, 12, y*TILE);
+                        grp.add(c);
+                    }
+                }
+            }
+            scene.map = grp;
+            scene.add(grp);
+
+            // SPAWN ENEMIES
+            for(let i=0; i<5+level; i++) {
+                let ex, ez;
+                do { ex=Math.floor(Math.random()*size); ez=Math.floor(Math.random()*size); } 
+                while(map[ez][ex] || Math.hypot(ex*TILE-TILE*1.5, ez*TILE-TILE*1.5) < 30);
+                
+                const en = new THREE.Mesh(new THREE.ConeGeometry(2, 4, 4), new THREE.MeshBasicMaterial({color: 0xff0000, wireframe:true}));
+                en.position.set(ex*TILE, 2, ez*TILE);
+                scene.add(en);
+                enemies.push({mesh:en, hp:3});
+            }
+
+            // PORTAL
+            let px=size-2, py=size-2; while(map[py][px]) { px--; py--; }
+            portal = new THREE.Mesh(new THREE.TorusGeometry(3, 0.5, 8, 20), new THREE.MeshBasicMaterial({color: 0x00ff00, wireframe:true}));
+            portal.position.set(px*TILE, 4, py*TILE);
+            scene.add(portal);
+
+            playerBody.position.set(TILE*1.5, 0, TILE*1.5);
+            document.getElementById('score').innerText = "LEVEL " + level;
+        }
+
+        function shoot() {
+            sfx('shoot');
+            // Weapon Recoil Animation
+            weapon.position.z = -0.5; // Kick back
+            setTimeout(()=> weapon.position.z = -0.8, 100); // Return
+
+            const ray = new THREE.Raycaster();
+            ray.setFromCamera({x:0, y:0}, camera);
+            const hits = ray.intersectObjects(enemies.map(e=>e.mesh));
+
+            if(hits.length && hits[0].distance < 60) {
+                const en = enemies.find(e=>e.mesh===hits[0].object);
+                if(en) {
+                    en.hp--;
+                    // Hit Marker
+                    const h = document.getElementById('hit-marker'); h.style.opacity=1; setTimeout(()=>h.style.opacity=0, 100);
+                    // Knockback
+                    en.mesh.position.add(hits[0].ray.direction.multiplyScalar(2));
+                    
+                    if(en.hp<=0) {
+                        scene.remove(en.mesh);
+                        enemies = enemies.filter(e=>e!==en);
+                    }
+                }
+            }
+        }
+
+        function check(x, z) {
+            const gx = Math.floor((x+TILE/2)/TILE);
+            const gy = Math.floor((z+TILE/2)/TILE);
+            return (map[gy] && map[gy][gx]) === 1;
+        }
+
+        function loop() {
+            requestAnimationFrame(loop);
+            const t = performance.now();
+            const dt = Math.min((t-prevTime)/1000, 0.1);
+            prevTime = t;
+
+            if(!isLocked) return;
+
+            // MOVEMENT
+            const dir = new THREE.Vector3();
+            if(move.f) dir.z -= 1; if(move.b) dir.z += 1;
+            if(move.l) dir.x -= 1; if(move.r) dir.x += 1;
+            dir.normalize();
+            dir.applyEuler(new THREE.Euler(0, playerBody.rotation.y, 0));
+            
+            const dx = dir.x * SPEED * dt;
+            const dz = dir.z * SPEED * dt;
+
+            if(!check(playerBody.position.x + dx, playerBody.position.z)) playerBody.position.x += dx;
+            if(!check(playerBody.position.x, playerBody.position.z + dz)) playerBody.position.z += dz;
+
+            // Weapon Sway (Bobbing)
+            if(move.f||move.b||move.l||move.r) {
+                weapon.position.y = -0.4 + Math.sin(t*0.01)*0.05;
+                weapon.position.x = 0.5 + Math.cos(t*0.01)*0.05;
+                if(Math.floor(t)%15 === 0) sfx('step'); // Simple footstep sync
+            }
+
+            // ENEMY AI (Simple Chase)
+            enemies.forEach(e => {
+                e.mesh.rotation.y += dt;
+                const dist = e.mesh.position.distanceTo(playerBody.position);
+                
+                // Line of Sight Raycast
+                const ray = new THREE.Raycaster(e.mesh.position, playerBody.position.clone().sub(e.mesh.position).normalize());
+                const hit = ray.intersectObjects(scene.map.children); // Check walls
+                
+                // If I see player (hit.distance is far or blocked)
+                // Note: Simplified logic. If dist < 40, chase blindly for arcade feel.
+                if(dist < 40 && dist > 3) { 
+                    const vec = playerBody.position.clone().sub(e.mesh.position).normalize();
+                    const nx = e.mesh.position.x + vec.x * dt * 8; // Enemy Speed
+                    const nz = e.mesh.position.z + vec.z * dt * 8;
+                    if(!check(nx, e.mesh.position.z)) e.mesh.position.x = nx;
+                    if(!check(e.mesh.position.x, nz)) e.mesh.position.z = nz;
+                }
+
+                if(dist < 3) {
+                    hp -= 0.5;
+                    document.getElementById('hp-bar').style.width = hp + "%";
+                    if(hp <= 0) { alert("SYSTEM FAILURE"); location.reload(); }
+                }
+            });
+
+            // PORTAL
+            portal.rotation.x += dt; portal.rotation.y += dt;
+            if(playerBody.position.distanceTo(portal.position) < 5) {
+                level++;
+                startLevel();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>

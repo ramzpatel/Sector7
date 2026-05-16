@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Procedural FPS: Phase 13 (The Armory)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; user-select: none; }
+        
+        /* HUD */
+        #hud { position: absolute; bottom: 20px; left: 20px; color: #0f0; font-size: 24px; font-weight: bold; pointer-events: none; text-shadow: 0 0 5px #0f0; }
+        #buff-indicator { position: absolute; bottom: 60px; left: 20px; color: #00ffff; font-size: 20px; font-weight: bold; text-shadow: 0 0 5px #0ff; display: none; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; background: #0f0; transform: translate(-50%, -50%); border-radius: 50%; pointer-events: none; box-shadow: 0 0 4px #0f0; }
+        
+        /* BOSS BAR */
+        #boss-container { 
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%); 
+            width: 400px; height: 30px; border: 2px solid #f00; display: none; 
+            background: rgba(50,0,0,0.5);
+        }
+        #boss-bar { width: 100%; height: 100%; background: #f00; transition: width 0.1s; }
+        #boss-label { position: absolute; top: -25px; left: 0; color: #f00; font-weight: bold; width: 100%; text-align: center; }
+
+        /* MINIMAP & ARROW */
+        #minimap-container { position: absolute; top: 20px; right: 20px; border: 2px solid #0f0; background: rgba(0,0,0,0.8); width: 150px; height: 150px; }
+        #minimap { width: 100%; height: 100%; display: block; }
+        #arrow-container { position: absolute; top: 100px; left: 50%; transform: translateX(-50%); display: none; pointer-events: none; }
+        #arrow { width: 0; height: 0; border-left: 15px solid transparent; border-right: 15px solid transparent; border-bottom: 40px solid #0f0; filter: drop-shadow(0 0 5px #0f0); transform-origin: 50% 50%; }
+
+        /* OVERLAYS */
+        #damage-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: radial-gradient(circle, transparent 50%, red 150%); opacity: 0; pointer-events: none; }
+        #instr, #pause-screen { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; text-align: center; background: rgba(0,0,0,0.9); padding: 40px; border: 2px solid #0f0; font-size: 18px; cursor: pointer; min-width: 300px; z-index: 10; }
+        #pause-screen { display: none; border-color: #ffaa00; color: #ffaa00; }
+    </style>
+</head>
+<body>
+    <div id="damage-overlay"></div>
+    <div id="hud">HP: 100 | LVL: 1</div>
+    <div id="buff-indicator">⚡ OVERCHARGE ACTIVE ⚡</div>
+    <div id="crosshair"></div>
+    
+    <div id="boss-container"><div id="boss-label">⚠ TITAN DETECTED ⚠</div><div id="boss-bar"></div></div>
+    <div id="minimap-container"><canvas id="minimap"></canvas></div>
+    <div id="arrow-container"><div id="arrow"></div></div>
+
+    <div id="instr">
+        <h2 style="color:#0f0; margin-top:0;">PHASE 13: THE ARMORY</h2>
+        &gt; SHOOT BLUE CRATES FOR LOOT<br>
+        &gt; COLLECT MEDKITS & POWERUPS<br>
+        &gt; SURVIVE<br><br>
+        <b>CLICK TO ENGAGE</b>
+    </div>
+    <div id="pause-screen"><h2>SYSTEM PAUSED</h2><b>CLICK TO RESUME</b></div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const MOVE_SPEED = 25.0, LOOK_SENS = 0.002, TILE_SIZE = 10;
+        
+        let scene, camera, renderer, playerBody, playerHead, gunGroup;
+        let particles=[], enemies=[], crates=[], pickups=[], mapData=[];
+        let moveFwd=0, moveBwd=0, moveLeft=0, moveRight=0;
+        let prevTime = performance.now();
+        let isLocked = false, mazeSize = 15, gameLevel = 1;
+        let player = { hp: 100 };
+        let portal, damageOpacity = 0, isBossLevel = false, screenShake = 0;
+        
+        // Weapon State
+        let lastShot = 0;
+        let fireRate = 150; // ms between shots
+        let buffTimer = 0;
+
+        const ctxMap = document.getElementById('minimap').getContext('2d');
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function sfx(type) {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            const t = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            
+            if (type === 'shoot') {
+                osc.type='sawtooth'; osc.frequency.setValueAtTime(buffTimer>0?200:110,t); 
+                osc.frequency.exponentialRampToValueAtTime(0.01,t+0.1);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.exponentialRampToValueAtTime(0.01,t+0.1);
+                osc.start(t); osc.stop(t+0.1);
+            } else if (type === 'exp') { 
+                osc.type='square'; osc.frequency.setValueAtTime(100,t); osc.frequency.exponentialRampToValueAtTime(0.01,t+0.3);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.exponentialRampToValueAtTime(0.01,t+0.3);
+                osc.start(t); osc.stop(t+0.3);
+            } else if (type === 'pickup') {
+                osc.type='sine'; osc.frequency.setValueAtTime(400,t); osc.frequency.linearRampToValueAtTime(800,t+0.2);
+                gain.gain.setValueAtTime(0.2,t); gain.gain.linearRampToValueAtTime(0,t+0.2);
+                osc.start(t); osc.stop(t+0.2);
+            } else if (type === 'hit_player') {
+                osc.type='sine'; osc.frequency.setValueAtTime(100,t); osc.frequency.linearRampToValueAtTime(50,t+0.1);
+                gain.gain.setValueAtTime(0.5,t); gain.gain.linearRampToValueAtTime(0,t+0.1);
+                osc.start(t); osc.stop(t+0.1);
+            } else if (type === 'boss_roar') {
+                osc.type='sawtooth'; osc.frequency.setValueAtTime(50,t); osc.frequency.linearRampToValueAtTime(20,t+1.0);
+                gain.gain.setValueAtTime(0.5,t); gain.gain.linearRampToValueAtTime(0,t+1.0);
+                osc.start(t); osc.stop(t+1.0);
+            }
+        }
+
+        function genTex(c1, c2) {
+            const cvs = document.createElement('canvas'); cvs.width=128; cvs.height=128;
+            const ctx = cvs.getContext('2d');
+            ctx.fillStyle=c1; ctx.fillRect(0,0,128,128);
+            ctx.fillStyle=c2;
+            for(let i=0;i<600;i++) ctx.fillRect(Math.random()*128,Math.random()*128,2,2);
+            ctx.strokeStyle='#111'; ctx.lineWidth=3; ctx.strokeRect(0,0,128,128);
+            const t = new THREE.CanvasTexture(cvs); t.magFilter=THREE.NearestFilter; return t;
+        }
+
+        function init() {
+            scene = new THREE.Scene(); scene.fog = new THREE.FogExp2(0x050505, 0.07);
+            playerBody = new THREE.Group(); scene.add(playerBody);
+            playerHead = new THREE.Group(); playerHead.position.y = 4; playerBody.add(playerHead);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            playerHead.add(camera);
+
+            gunGroup = new THREE.Group();
+            const gunMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.4 });
+            const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 1.5), gunMat);
+            barrel.position.set(0.25, -0.3, -0.5); gunGroup.add(barrel);
+            const sight = new THREE.Mesh(new THREE.BoxGeometry(0.05,0.05,0.1), new THREE.MeshBasicMaterial({color:0x00ff00}));
+            sight.position.set(0.25, -0.1, -1.2); gunGroup.add(sight);
+            playerHead.add(gunGroup);
+
+            scene.add(new THREE.AmbientLight(0x404040));
+            const flash = new THREE.PointLight(0xffaa00, 1.5, 20); flash.position.set(0,0,0); playerBody.add(flash);
+
+            renderer = new THREE.WebGLRenderer({antialias:false});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            resetLevel();
+
+            document.body.onclick = () => { document.body.requestPointerLock(); };
+            document.addEventListener('pointerlockchange', () => { 
+                isLocked = document.pointerLockElement === document.body;
+                if(isLocked) {
+                    document.getElementById('instr').style.display = 'none';
+                    document.getElementById('pause-screen').style.display = 'none';
+                    prevTime = performance.now();
+                } else {
+                    document.getElementById('pause-screen').style.display = 'block';
+                }
+            });
+            document.addEventListener('mousedown', () => { if(isLocked) isFiring = true; });
+            document.addEventListener('mouseup', () => { isFiring = false; });
+            document.addEventListener('mousemove', e => {
+                if(isLocked) {
+                    playerBody.rotation.y -= e.movementX * LOOK_SENS;
+                    playerHead.rotation.x -= e.movementY * LOOK_SENS;
+                    playerHead.rotation.x = Math.max(-1.5, Math.min(1.5, playerHead.rotation.x));
+                }
+            });
+            document.addEventListener('keydown', e => onKey(e.code, 1));
+            document.addEventListener('keyup', e => onKey(e.code, 0));
+            animate();
+        }
+
+        let isFiring = false;
+        function onKey(k,v) {
+            if(k=='KeyW') moveFwd=v; if(k=='KeyS') moveBwd=v;
+            if(k=='KeyA') moveLeft=v; if(k=='KeyD') moveRight=v;
+        }
+
+        function genMaze(s) {
+            let m=Array(s).fill().map(()=>Array(s).fill(1));
+            function d(x,y){
+                m[y][x]=0;
+                [[0,-2],[0,2],[-2,0],[2,0]].sort(()=>Math.random()-.5).forEach(([dx,dy])=>{
+                    let nx=x+dx,ny=y+dy;
+                    if(nx>0&&nx<s-1&&ny>0&&ny<s-1&&m[ny][nx]){ m[y+dy/2][x+dx/2]=0; d(nx,ny); }
+                });
+            }
+            d(1,1); m[1][1]=0; m[1][2]=0; return m;
+        }
+
+        function genArena(s) {
+            let m=Array(s).fill().map(()=>Array(s).fill(1));
+            for(let y=1; y<s-1; y++) for(let x=1; x<s-1; x++) {
+                m[y][x] = 0; if(x%4===0 && y%4===0) m[y][x] = 1;
+            }
+            return m;
+        }
+
+        function resetLevel() {
+            enemies.forEach(e=>scene.remove(e.mesh)); enemies=[];
+            crates.forEach(c=>scene.remove(c)); crates=[];
+            pickups.forEach(p=>scene.remove(p)); pickups=[];
+            if(scene.mapRoot) scene.remove(scene.mapRoot);
+            if(portal) scene.remove(portal); portal=null;
+            particles = [];
+            
+            isBossLevel = (gameLevel % 3 === 0);
+            document.getElementById('boss-container').style.display = isBossLevel ? 'block' : 'none';
+            document.getElementById('arrow-container').style.display = 'none';
+            
+            mazeSize = isBossLevel ? 20 : 10 + (gameLevel * 2);
+            mapData = isBossLevel ? genArena(mazeSize) : genMaze(mazeSize);
+            
+            scene.mapRoot = new THREE.Group();
+            scene.add(scene.mapRoot);
+
+            const matW = new THREE.MeshStandardMaterial({map: genTex(isBossLevel?'#300':'#444', isBossLevel?'#500':'#666'), roughness:0.5});
+            const matF = new THREE.MeshStandardMaterial({map: genTex('#222','#333'), roughness:0.9});
+            const geo = new THREE.BoxGeometry(TILE_SIZE, 12, TILE_SIZE);
+
+            for(let y=0; y<mazeSize; y++) {
+                for(let x=0; x<mazeSize; x++) {
+                    if(mapData[y][x]) {
+                        const w = new THREE.Mesh(geo, matW);
+                        w.position.set(x*TILE_SIZE, 6, y*TILE_SIZE);
+                        scene.mapRoot.add(w);
+                    } else {
+                        const f = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE,TILE_SIZE), matF);
+                        f.rotation.x = -Math.PI/2; f.position.set(x*TILE_SIZE,0,y*TILE_SIZE);
+                        scene.mapRoot.add(f);
+                        const c = new THREE.Mesh(new THREE.PlaneGeometry(TILE_SIZE,TILE_SIZE), matF);
+                        c.rotation.x = Math.PI/2; c.position.set(x*TILE_SIZE,12,y*TILE_SIZE);
+                        scene.mapRoot.add(c);
+                    }
+                }
+            }
+
+            playerBody.position.set(TILE_SIZE*1.5, 0, TILE_SIZE*1.5);
+            playerBody.rotation.y = 0;
+            
+            if(isBossLevel) { spawnBoss(); sfx('boss_roar'); } else { for(let i=0; i<5+gameLevel; i++) spawnEnemy(); }
+            
+            // Spawn Crates
+            if(!isBossLevel) {
+                for(let i=0; i<4; i++) spawnCrate();
+            }
+            updateHUD();
+        }
+
+        function spawnEnemy() {
+            let ex, ez;
+            do { ex=Math.floor(Math.random()*mazeSize); ez=Math.floor(Math.random()*mazeSize); } 
+            while(mapData[ez][ex] || Math.hypot(ex*TILE_SIZE-playerBody.position.x, ez*TILE_SIZE-playerBody.position.z)<30);
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.DodecahedronGeometry(2), new THREE.MeshStandardMaterial({color:0x000000, roughness:0.2}));
+            const wire = new THREE.Mesh(new THREE.DodecahedronGeometry(2.1), new THREE.MeshBasicMaterial({color:0xff0000, wireframe:true}));
+            g.add(body); g.add(wire);
+            g.userData = { hp: 3, type: 'grunt' };
+            g.position.set(ex*TILE_SIZE, 4, ez*TILE_SIZE);
+            scene.add(g); enemies.push(g);
+        }
+
+        function spawnBoss() {
+            let cx = Math.floor(mazeSize/2), cz = Math.floor(mazeSize/2);
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.IcosahedronGeometry(6, 0), new THREE.MeshStandardMaterial({color:0x220000, roughness:0.2}));
+            const wire = new THREE.Mesh(new THREE.IcosahedronGeometry(6.2, 0), new THREE.MeshBasicMaterial({color:0xff0000, wireframe:true}));
+            g.add(body); g.add(wire);
+            g.userData = { hp: 50, maxHp: 50, type: 'titan' };
+            g.position.set(cx*TILE_SIZE, 8, cz*TILE_SIZE);
+            scene.add(g); enemies.push(g);
+            updateBossBar(50, 50);
+        }
+
+        function spawnCrate() {
+            let cx, cz;
+            do { cx=Math.floor(Math.random()*mazeSize); cz=Math.floor(Math.random()*mazeSize); } 
+            while(mapData[cz][cx]); // Find empty spot
+            
+            const mat = new THREE.MeshStandardMaterial({color:0x00ffff, roughness:0.2, emissive:0x003333});
+            const crate = new THREE.Mesh(new THREE.BoxGeometry(3,3,3), mat);
+            crate.position.set(cx*TILE_SIZE, 1.5, cz*TILE_SIZE);
+            crate.userData = { hp: 2, type: 'crate' };
+            scene.add(crate); crates.push(crate);
+        }
+
+        function spawnPickup(pos) {
+            const isMedkit = Math.random() > 0.5;
+            const geo = new THREE.BoxGeometry(1,1,1);
+            const mat = new THREE.MeshBasicMaterial({color: isMedkit?0xff0000:0x00ffff, wireframe:true});
+            const p = new THREE.Mesh(geo, mat);
+            p.position.copy(pos);
+            p.userData = { type: isMedkit?'medkit':'ammo', val: 25 };
+            scene.add(p); pickups.push(p);
+        }
+
+        function spawnPortal() {
+            const geo = new THREE.TorusKnotGeometry(1.5, 0.4, 64, 8);
+            const mat = new THREE.MeshBasicMaterial({color: 0x00ff00, wireframe: true});
+            portal = new THREE.Mesh(geo, mat);
+            let px, pz, valid=false;
+            while(!valid) {
+                px = Math.floor(Math.random() * mazeSize); pz = Math.floor(Math.random() * mazeSize);
+                if(mapData[pz][px] === 0 && Math.hypot(px*TILE_SIZE - playerBody.position.x, pz*TILE_SIZE - playerBody.position.z) > 40) valid = true;
+            }
+            portal.position.set(px*TILE_SIZE, 2, pz*TILE_SIZE);
+            scene.add(portal);
+            document.getElementById('hud').innerText += " | PORTAL OPEN!";
+            document.getElementById('arrow-container').style.display = 'block';
+        }
+
+        function shoot() {
+            const now = performance.now();
+            if(now - lastShot < (buffTimer > 0 ? 50 : 150)) return; // Fire Rate Logic
+            lastShot = now;
+
+            sfx('shoot');
+            gunGroup.position.z += 0.5; screenShake = 0.2; 
+            const flash = new THREE.PointLight(buffTimer>0?0x00ffff:0x00ff00, 5, 10);
+            flash.position.set(0.25, -0.3, -2); playerHead.add(flash);
+            setTimeout(()=>playerHead.remove(flash), 50);
+
+            const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2(0,0), camera);
+            
+            // Check Enemies
+            const hits = ray.intersectObjects(enemies.map(e=>e.children[0]).concat(crates));
+            
+            if(hits.length>0 && hits[0].distance < 80) { 
+                const obj = hits[0].object;
+                
+                // Handle Crate Hit
+                if(crates.includes(obj)) {
+                    obj.userData.hp--;
+                    obj.material.emissive.setHex(0xffffff);
+                    setTimeout(()=>obj.material.emissive.setHex(0x003333), 50);
+                    if(obj.userData.hp <= 0) {
+                        spawnParticles(obj.position, 0x00ffff, 10);
+                        spawnPickup(obj.position);
+                        sfx('exp');
+                        scene.remove(obj);
+                        crates = crates.filter(c=>c!==obj);
+                    }
+                    return;
+                }
+
+                // Handle Enemy Hit
+                const parent = obj.parent;
+                if(parent) {
+                    parent.userData.hp--;
+                    obj.material.emissive = new THREE.Color(0xffffff);
+                    setTimeout(()=>obj.material.emissive = new THREE.Color(0x000000), 50);
+                    if(parent.userData.type === 'titan') updateBossBar(parent.userData.hp, parent.userData.maxHp);
+
+                    if(parent.userData.hp <= 0) {
+                        spawnParticles(parent.position, parent.userData.type==='titan'?0xffaa00:0xff0000, 15);
+                        sfx('exp');
+                        scene.remove(parent);
+                        enemies = enemies.filter(e=>e!==parent);
+                        updateHUD();
+                        if(enemies.length === 0) spawnPortal();
+                    }
+                }
+            }
+        }
+        
+        function spawnParticles(pos, color, count) {
+            const mat = new THREE.MeshBasicMaterial({color: color});
+            const geo = new THREE.BoxGeometry(0.5,0.5,0.5);
+            for(let i=0; i<count; i++) {
+                const m = new THREE.Mesh(geo, mat);
+                m.position.copy(pos);
+                m.userData = { vel: new THREE.Vector3((Math.random()-.5)*30, (Math.random()-.5)*30, (Math.random()-.5)*30), life: 1.0 };
+                scene.add(m); particles.push(m);
+            }
+        }
+
+        function updateBossBar(hp, max) { document.getElementById('boss-bar').style.width = (hp/max*100) + '%'; }
+        function checkCol(x, z) {
+            const gx=Math.floor((x+TILE_SIZE/2)/TILE_SIZE), gz=Math.floor((z+TILE_SIZE/2)/TILE_SIZE);
+            return gx<0||gx>=mazeSize||gz<0||gz>=mazeSize||mapData[gz][gx];
+        }
+
+        function updateMinimap() {
+            ctxMap.fillStyle = '#000'; ctxMap.fillRect(0,0,300,300);
+            const cellW = 300 / mazeSize;
+            for(let y=0; y<mazeSize; y++) for(let x=0; x<mazeSize; x++) if(mapData[y][x]===1) {
+                ctxMap.fillStyle = '#444'; ctxMap.fillRect(x*cellW, y*cellW, cellW, cellW);
+            }
+            const px = (playerBody.position.x / TILE_SIZE) * cellW;
+            const py = (playerBody.position.z / TILE_SIZE) * cellW;
+            ctxMap.fillStyle = '#0f0'; ctxMap.beginPath(); ctxMap.arc(px, py, 3, 0, Math.PI*2); ctxMap.fill();
+            ctxMap.fillStyle = '#f00'; enemies.forEach(e => {
+                const ex = (e.position.x / TILE_SIZE) * cellW; const ey = (e.position.z / TILE_SIZE) * cellW;
+                ctxMap.beginPath(); ctxMap.arc(ex, ey, e.userData.type==='titan'?6:2, 0, Math.PI*2); ctxMap.fill();
+            });
+            ctxMap.fillStyle = '#0ff'; crates.forEach(c => { // Crates on map
+                ctxMap.fillRect((c.position.x/TILE_SIZE)*cellW - 2, (c.position.z/TILE_SIZE)*cellW - 2, 4, 4);
+            });
+            if(portal) {
+                const pox = (portal.position.x / TILE_SIZE) * cellW; const poy = (portal.position.z / TILE_SIZE) * cellW;
+                ctxMap.fillStyle = '#00f'; ctxMap.beginPath(); ctxMap.arc(pox, poy, 4, 0, Math.PI*2); ctxMap.fill();
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = performance.now();
+            const delta = Math.min((now - prevTime)/1000, 0.1);
+            prevTime = now;
+
+            if(damageOpacity > 0) { damageOpacity -= delta * 1.5; document.getElementById('damage-overlay').style.opacity = damageOpacity; }
+            if(screenShake > 0) {
+                screenShake -= delta * 2;
+                playerHead.position.x = (Math.random()-0.5) * screenShake;
+                playerHead.position.y = 4 + (Math.random()-0.5) * screenShake;
+            } else { playerHead.position.set(0,4,0); }
+
+            if(isLocked) {
+                if(isFiring) shoot(); // Auto-fire check
+
+                // Buff Logic
+                if(buffTimer > 0) {
+                    buffTimer -= delta;
+                    document.getElementById('buff-indicator').style.display = 'block';
+                    if(buffTimer <= 0) document.getElementById('buff-indicator').style.display = 'none';
+                }
+
+                document.getElementById('minimap').width = 300; document.getElementById('minimap').height = 300;
+                updateMinimap();
+
+                for(let i=particles.length-1; i>=0; i--) {
+                    const p = particles[i];
+                    p.position.add(p.userData.vel.clone().multiplyScalar(delta));
+                    p.userData.life -= delta * 2;
+                    p.scale.setScalar(p.userData.life);
+                    if(p.userData.life <= 0) { scene.remove(p); particles.splice(i,1); }
+                }
+
+                let mx=0, mz=0;
+                if(moveFwd) mz -= MOVE_SPEED*delta; if(moveBwd) mz += MOVE_SPEED*delta;
+                if(moveLeft) mx -= MOVE_SPEED*delta; if(moveRight) mx += MOVE_SPEED*delta;
+                const moveVec = new THREE.Vector3(mx, 0, mz);
+                moveVec.applyEuler(new THREE.Euler(0, playerBody.rotation.y, 0));
+                if(!checkCol(playerBody.position.x+moveVec.x, playerBody.position.z)) playerBody.position.x += moveVec.x;
+                if(!checkCol(playerBody.position.x, playerBody.position.z+moveVec.z)) playerBody.position.z += moveVec.z;
+
+                gunGroup.position.z += (0 - gunGroup.position.z) * delta * 5;
+                if(mx!==0 || mz!==0) {
+                    gunGroup.position.y = Math.sin(now * 0.01) * 0.05;
+                    gunGroup.position.x = Math.cos(now * 0.01) * 0.05;
+                }
+
+                // Pickup Logic
+                pickups.forEach((p, idx) => {
+                    p.rotation.y += delta; p.position.y = 1.5 + Math.sin(now*0.005)*0.5;
+                    if(p.position.distanceTo(playerBody.position) < 2.5) {
+                        sfx('pickup');
+                        if(p.userData.type === 'medkit') player.hp = Math.min(100, player.hp + 25);
+                        if(p.userData.type === 'ammo') buffTimer = 10.0; // 10s Rapid Fire
+                        scene.remove(p); pickups.splice(idx, 1);
+                        updateHUD();
+                    }
+                });
+
+                enemies.forEach(e => {
+                    const type = e.userData.type;
+                    e.rotation.y += delta;
+                    e.children[1].rotation.z -= delta*2;
+                    const dist = e.position.distanceTo(playerBody.position);
+                    const aggro = type==='titan' ? 80 : 40;
+                    
+                    if(dist < aggro) {
+                        const dir = new THREE.Vector3().subVectors(playerBody.position, e.position).normalize();
+                        const speed = type==='titan' ? 8 : 12; // Titan is slower
+                        const nextX = e.position.x + dir.x * delta * speed;
+                        const nextZ = e.position.z + dir.z * delta * speed;
+                        if(!checkCol(nextX, e.position.z)) e.position.x = nextX;
+                        if(!checkCol(e.position.x, nextZ)) e.position.z = nextZ;
+                    }
+                    const dmgRange = type==='titan' ? 10.0 : 6.0;
+                    if(dist < dmgRange) { 
+                        if(damageOpacity <= 0) {
+                            player.hp -= type==='titan' ? 30 : 10;
+                            sfx('hit_player');
+                            damageOpacity = 0.8;
+                            screenShake = 1.0; 
+                            updateHUD();
+                            if(player.hp<=0) { alert("DEAD. LVL: " + gameLevel); location.reload(); }
+                        }
+                    }
+                });
+
+                if(portal) {
+                    portal.rotation.x += delta; portal.rotation.y += delta;
+                    if(playerBody.position.distanceTo(portal.position) < 3) { gameLevel++; player.hp=100; resetLevel(); }
+                    if(enemies.length === 0) {
+                        const dx = portal.position.x - playerBody.position.x;
+                        const dz = portal.position.z - playerBody.position.z;
+                        const angle = Math.atan2(dx, dz);
+                        const rotation = (playerBody.rotation.y - angle) * (180 / Math.PI);
+                        document.getElementById('arrow').style.transform = `rotate(${rotation + 180}deg)`;
+                    }
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        
+        function updateHUD() { document.getElementById('hud').innerText = `HP: ${Math.floor(player.hp)} | LVL: ${gameLevel} | HOSTILES: ${enemies.length}`; }
+
+        init();
+    </script>
+</body>
+</html>
